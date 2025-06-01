@@ -7,6 +7,9 @@ enum Op{
     Add,
     Mul,
     Tanh,
+    Neg,
+    Pow,
+    Powf,
     None
 }
 struct Value{
@@ -42,7 +45,7 @@ impl ValueWrapper{
         })))
     }
     
-    fn tanh(self) -> ValueWrapper{
+    fn tanh(&self) -> ValueWrapper{
         //unary operations can be done as a reference, but lets stick to Andrej's implementation
         let operation_result = self.0.borrow().data.tanh();
         
@@ -56,7 +59,48 @@ impl ValueWrapper{
         }));
         result
     }
+    
+    fn powf(&self, value: f64) -> ValueWrapper {
+        let operation_result = self.0.borrow().data.powf(value);
+        
+        let result = ValueWrapper::new(operation_result, vec![self.0.clone()], Op::Powf);
+        
+        let result_reference = result.0.clone();
+        let self_reference = self.0.clone();
+        
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+           let local_derivative =  value * self_reference.borrow().data.powf(value - 1.0);
+           self_reference.borrow_mut().grad += result_reference.borrow().grad * local_derivative;
+        }));  
+        result     
+    }
+    
+    fn pow(&self, other: &ValueWrapper) -> ValueWrapper{
+        let operation_result = self.0.borrow().data.powf(other.0.borrow().data);
+        
+        let result = ValueWrapper::new(operation_result, vec![self.0.clone(), other.0.clone()], Op::Pow);
+        
+        let result_reference = result.0.clone();
+        let self_reference = self.0.clone();
+        let other_reference = other.0.clone();
+        
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let grad_output = result_reference.borrow().data;
+           
+            if self_reference.borrow().data > 0.0 {
+                let base_derivative = other_reference.borrow().data * self_reference.borrow().data.powf(other_reference.borrow().data - 1.0);
+                self_reference.borrow_mut().grad += base_derivative * result_reference.borrow().grad; 
+            }
+            
+            if self_reference.borrow().data > 0.0 {
+                let exponent_derivative = grad_output * self_reference.borrow().data.ln();
+                other_reference.borrow_mut().grad += exponent_derivative * result_reference.borrow().grad;
+            }
+        }));  
+        result  
+    }
 }
+
 
 impl Add for ValueWrapper{
     type Output = Self;
