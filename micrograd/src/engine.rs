@@ -48,22 +48,10 @@ impl Hash for ValueWrapper {
 
 impl ValueWrapper{
     fn new(data: f64, children : Vec<Rc<RefCell<Value>>>, op: Op) -> Self {
-        ValueWrapper(Rc::new(RefCell::new(Value{
-            data,
-            grad: 0.0,
-            backward: None,
-            op: op,
-            prev: children,
-        })))
+        ValueWrapper(Rc::new(RefCell::new(Value{data, grad: 0.0, backward: None, op: op, prev: children,})))
     }
     fn minimal_new(data: f64) -> Self{
-        ValueWrapper(Rc::new(RefCell::new(Value{
-            data,
-            grad: 0.0,
-            backward: None,
-            op: Op::None,
-            prev: vec![],
-        })))
+        ValueWrapper(Rc::new(RefCell::new(Value{data, grad: 0.0, backward: None, op: Op::None, prev: vec![],})))
     }
     
     fn tanh(&self) -> ValueWrapper{
@@ -133,6 +121,15 @@ impl ValueWrapper{
         }
     }
     
+    fn zero_grad(&self){
+        self.0.borrow_mut().grad = 0.0;
+        let topologically_ordered_terms = self.build_topological_graph();
+        
+        for term in topologically_ordered_terms.iter().rev(){
+            term.0.borrow_mut().grad = 0.0;
+        }
+    }
+    
     fn build_topological_graph(&self) -> Vec<ValueWrapper>{
         let mut topologically_sorted: Vec<ValueWrapper> = Vec::new();
         let mut visited: HashSet<ValueWrapper> = HashSet::new();
@@ -191,6 +188,7 @@ impl Mul for ValueWrapper{
     }      
 }
 
+
 fn main() {
     // Example usage
     let a = ValueWrapper::minimal_new(2.0);
@@ -218,33 +216,70 @@ fn main() {
     y.init_backward();
     println!("tanh test - x.data: {}, y.data: {}, x.grad: {}", 
              x.0.borrow().data, y.0.borrow().data, x.0.borrow().grad);
-             
-    test_neural_network();
+    
+    train_test();
 }
 
-// Add this to your main.rs after the existing main function
-fn test_neural_network() {
-    // Create a simple MLP: 3 inputs -> 4 hidden -> 4 hidden -> 1 output
-    let mlp = MLP::new(3, vec![4, 4, 1]);
-    
-    // Create some test inputs
-    let inputs = vec![
-        ValueWrapper::minimal_new(2.0),
-        ValueWrapper::minimal_new(3.0),
-        ValueWrapper::minimal_new(-1.0),
-    ];
-    
-    // Forward pass
-    let output = mlp.call(inputs);
-    
-    println!("Neural network output: {}", output[0].0.borrow().data);
-    
-    // Backward pass
-    output[0].init_backward();
-    
-    // Check gradients of parameters
-    let params = mlp.parameters();
-    println!("Number of parameters: {}", params.len());
-    println!("First parameter gradient: {}", params[0].0.borrow().grad);
-    println!("Last parameter gradient: {}", params[params.len()-1].0.borrow().grad);
+fn train_test(){
+	let mlp = MLP::new(3, vec![4, 4, 1]);
+	let xs = vec![vec![ValueWrapper::minimal_new(2.0), ValueWrapper::minimal_new(3.0), ValueWrapper::minimal_new(-1.0)], 
+	vec![ValueWrapper::minimal_new(3.0), ValueWrapper::minimal_new(-1.0), ValueWrapper::minimal_new(0.5)],
+	vec![ValueWrapper::minimal_new(0.5), ValueWrapper::minimal_new(1.0), ValueWrapper::minimal_new(1.0)],
+	vec![ValueWrapper::minimal_new(1.0), ValueWrapper::minimal_new(1.0), ValueWrapper::minimal_new(-1.0)]];
+	
+	let ys = vec![ValueWrapper::minimal_new(1.0), ValueWrapper::minimal_new(-1.0), ValueWrapper::minimal_new(-1.0), ValueWrapper::minimal_new(1.0)];
+	
+	train(30, 0.01, &mlp, xs, ys);
 }
+
+fn zero_gradients(neural_network: &MLP){
+	let parameters = neural_network.parameters();
+	for parameter in &parameters{
+		parameter.0.borrow_mut().grad = 0.0;
+	}
+}
+
+fn gradient_descent(neural_network: &MLP, learning_rate : f64){
+	let parameters = neural_network.parameters();
+	for parameter in &parameters{
+		let mut curr_value = parameter.0.borrow_mut();
+		let mut curr_data = curr_value.data;
+		let curr_grad = curr_value.grad;
+		parameter.0.borrow_mut().data = parameter.0.borrow_mut().data - learning_rate * curr_grad;
+	}
+}
+
+fn train(number_of_epochs: usize, learning_rate : f64, neural_network: &MLP, training_batch : Vec<Vec<ValueWrapper>>, targets : Vec<ValueWrapper>){
+    for epoch in 0..number_of_epochs{
+    	zero_gradients(neural_network);
+    	let mut predictions = Vec::new();
+    	for training_example in &training_batch{
+    		let prediction = neural_network.call(training_example.clone());
+    		predictions.extend(prediction); 
+    	}
+        let loss = calculate_loss(predictions, &targets);
+        loss.init_backward();
+        gradient_descent(neural_network, learning_rate);
+        
+        if epoch % 10 == 0 {
+            println!("Epoch {}: Loss = {}",epoch,loss.0.borrow().data);
+        }
+    }
+}
+
+fn calculate_loss(prediction_values: Vec<ValueWrapper>, target_values: &Vec<ValueWrapper>) -> ValueWrapper{
+    let mut loss = ValueWrapper::minimal_new(0.0);
+    
+    for (prediction, target) in prediction_values.iter().zip(target_values.iter()){
+        let diff = prediction.clone() + (target.clone() * ValueWrapper::minimal_new(-1.0));
+        let squared_diff = diff.clone() * diff.clone();
+        loss = loss + squared_diff;
+    }
+    
+    let num_samples = ValueWrapper::minimal_new(prediction_values.len() as f64);
+    
+    loss = loss * num_samples.powf(-1.0);
+    
+    loss
+}
+
