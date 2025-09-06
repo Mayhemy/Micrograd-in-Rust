@@ -4,12 +4,14 @@ use std::hash::{Hash, Hasher};
 use std::collections::HashSet;
 use rand::Rng;
 use std::cmp;
+use std::ops::{Add, Mul};
 
 #[derive(Debug, Clone)]
 enum TensorOp{
 	Reshape,
     View,
     Add,
+    Mul,
     MatMul,
     ReLU,
     Conv2d,
@@ -121,21 +123,12 @@ impl Tensor{
         let requires_grad = false;
         let children = vec![];
         let op = TensorOp::None;
-    let b = Tensor::ones(vec![1, 3]);
-    let c = a + b;
-    println!("Broadcasting result: {:?}", c);
-
-
-
-
 
         Tensor::new(data, shape, requires_grad, children, op)
     }
 
-    pub fn index_1d(&self, indices: Vec<usize>) -> usize{
+    pub fn index_1d(indices: Vec<usize>, shape: &[usize]) -> usize{
         // indeksi ce nam biti u obliku (1,0,1,1) a shape je (2,2,2,2), krecemo od kraja i trazimo 1d index
-        let tensor_borrowed = self.0.borrow();
-        let shape = &tensor_borrowed.shape;
         let mut index_1d = 0;
         let mut multiplier = 1;
         for i in (0..indices.len()).rev(){
@@ -146,9 +139,7 @@ impl Tensor{
     }
 
     // inverzna operacija od index_1d (od 1d indeksa pravimo n-dimenzioni indeks)
-    pub fn index_1d_to_nd(&self, index_1d: usize) -> Vec<usize>{
-        let tensor_borrowed = self.0.borrow();
-        let shape = &tensor_borrowed.shape;
+    pub fn index_1d_to_nd(index_1d: usize, shape: &[usize]) -> Vec<usize>{
         let mut indices = vec![0; shape.len()];
         let mut remainder = index_1d;
         for i in (0..shape.len()).rev(){
@@ -192,6 +183,7 @@ impl Tensor{
         }
     }
 
+    //daje nam shape resulta za ab
     pub fn util_calculate_broadcast_shapes(shape_a: &[usize], shape_b: &[usize]) -> Result<Vec<usize>, String>{
         // rev je O(n) tako da cemo implementirati bez reva
         let max_len = cmp::max(shape_a.len(), shape_b.len());
@@ -221,24 +213,160 @@ impl Tensor{
                     return Err(format!("Operands could not be broadcast together: shape_a[{}] = {} != shape_b[{}] = {}", i, shape_a[i], i, shape_b[i]));
                 }
             }
+            broadcast_shape[i] = result_dimension;
         }
 
-        Ok(broadcast_shape);
+        Ok(broadcast_shape)
     }
 
+    // ova funkcija nam daje 1d index za prvobitni array(original) za neki broadcast shape i broadcast indices
     //lose, implementiraj opet kad razumes glupane
-    pub fn get_broadcast_idx_value(original_shape: &[usize], broadcast_shape: &[usize]) -> usize{
+    //mislim da je sad dobro?
+    pub fn util_get_broadcast_idx_value(original_shape: &[usize], broadcast_shape: &[usize], broadcast_indices: &[usize]) -> usize{
         let difference_in_shape_dimensions = broadcast_shape.len() - original_shape.len();
-        let mut original_indices = vec![0.0, original_shape.len()];
+        let mut original_indices = vec![0; original_shape.len()];
         for i in 0..original_shape.len(){
             let broadcast_shape_index = i + difference_in_shape_dimensions;
 
-            if original_shape[i] == 1 && broadcasted_shape[broadcast_shape_index] > 1{
-                original_indices[i]
+            if original_shape[i] == 1 && broadcast_shape[broadcast_shape_index] > 1{
+                original_indices[i] = 0;
+            }else{
+                original_indices[i] = broadcast_indices[broadcast_shape_index];
             }
         }
-    }
 
+        let flattened_idx = Self::index_1d(original_indices, original_shape);
+        flattened_idx
+    }
+}
+
+impl Add for Tensor{
+    type Output = Self;
+
+	fn add(self, other: Self) -> Self{
+        let a_shape = &self.0.borrow().shape;
+        let b_shape = &other.0.borrow().shape;
+
+
+        //result shape samo izmnozen - prakticno length(broj svih elemenata nekog tensora)
+        let mut result_len = 1;
+        let mut result_shape;
+        match Self::util_calculate_broadcast_shapes(&a_shape, &b_shape){
+            Ok(result) => {
+                result_shape = result;
+                for shape in &result_shape{
+                    result_len *= shape;
+                }
+            },
+            Err(err) => panic!("{:?}", err)
+        }
+        let mut result_data = vec![0.0; result_len];
+
+        // ovde zelim da dobijem indeks prvo pozicije i u result_shape-u
+        // pa onda posle toga trazim
+        for i in 0..result_len{
+            let result_idx = Self::index_1d_to_nd(i, &result_shape);
+
+            let a_idx = Self::util_get_broadcast_idx_value(a_shape, &result_shape, &result_idx);
+            let b_idx = Self::util_get_broadcast_idx_value(b_shape, &result_shape, &result_idx);
+
+            result_data[i] = self.0.borrow().data[a_idx] + other.0.borrow().data[b_idx];
+
+            //result_data[i] = self.0.borrow().data[i] + other.0.borrow().data[i];
+        }
+
+        let result = Tensor::new(result_data, result_shape.clone(), true, vec![self.0.clone(), other.0.clone()], TensorOp::Add);
+
+
+        // ovo mora jer ce kasnije ovaj backwards biti pozvan kada ne budu vise ove varijable postojale
+        let result_copy = result.0.clone();
+        let result_shape_copy = result_shape.clone();
+        let self_copy = self.0.clone();
+        let other_copy = other.0.clone();
+        let a_shape_copy = a_shape.clone();
+        let b_shape_copy = b_shape.clone();
+
+        // a je prvi clan b je drugi clan c = a + b; c = self + other
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let grad_output = &result_copy.borrow().grad;
+
+            for i in 0..grad_output.len(){
+                let result_idx = Self::index_1d_to_nd(i, &result_shape_copy);
+
+                let a_idx = Self::util_get_broadcast_idx_value(&a_shape_copy, &result_shape_copy, &result_idx);
+                let b_idx = Self::util_get_broadcast_idx_value(&b_shape_copy, &result_shape_copy, &result_idx);
+
+                self_copy.borrow_mut().grad[a_idx] += grad_output[i]; //grad outputova uvek ce biti vise jer se broadcastuje
+                other_copy.borrow_mut().grad[b_idx] += grad_output[i];
+            }
+        }));
+
+        result
+
+    }
+}
+
+
+
+// ovo je obican mul znaci element sa elementom ( NE MATMUL)
+impl Mul for Tensor{
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self{
+        let a_shape = &self.0.borrow().shape;
+        let b_shape = &other.0.borrow().shape;
+
+        let mut result_len = 1;
+        let result_shape;
+        match Self::util_calculate_broadcast_shapes(&a_shape, &b_shape){
+            Ok(result) => {
+                result_shape = result;
+                for shape in &result_shape{
+                    result_len *= shape;
+                }
+            },
+            Err(err) => panic!("{:?}", err)
+        }
+
+        let mut result_data = vec![0.0; result_len];
+
+        for i in 0..result_len{
+            let result_idx = Self::index_1d_to_nd(i, &result_shape);
+
+            let a_idx = Self::util_get_broadcast_idx_value(&a_shape, &result_shape, &result_idx);
+            let b_idx = Self::util_get_broadcast_idx_value(&b_shape, &result_shape, &result_idx);
+
+            result_data[i] = self.0.borrow().data[a_idx] * other.0.borrow().data[b_idx];
+        }
+        let result = Tensor::new(result_data, result_shape.clone(), true, vec![self.0.clone(), other.0.clone()], TensorOp::Mul);
+
+
+        // ovo mora jer ce kasnije ovaj backwards biti pozvan kada ne budu vise ove varijable postojale
+        let result_copy = result.0.clone();
+        let result_shape_copy = result_shape.clone();
+        let self_copy = self.0.clone();
+        let other_copy = other.0.clone();
+        let a_shape_copy = a_shape.clone();
+        let b_shape_copy = b_shape.clone();
+
+        // a je prvi clan b je drugi clan c = a + b; c = self + other
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let grad_output = &result_copy.borrow().grad;
+            let a_data = &self_copy.borrow().data;
+            let b_data = &other_copy.borrow().data;
+
+            for i in 0..grad_output.len(){
+                let result_indices = Self::index_1d_to_nd(i, &result_shape_copy);
+
+                let a_idx = Self::util_get_broadcast_idx_value(&a_shape_copy, &result_shape_copy, &result_indices);
+                let b_idx = Self::util_get_broadcast_idx_value(&b_shape_copy, &result_shape_copy, &result_indices);
+
+                self_copy.borrow_mut().grad[a_idx] += grad_output[i] * b_data[b_idx];
+                other_copy.borrow_mut().grad[b_idx] += grad_output[i] * a_data[a_idx];
+            }
+        }));
+        result
+    }
 }
 
 #[cfg(test)]
