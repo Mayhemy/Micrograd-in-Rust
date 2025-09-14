@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::collections::HashSet;
+use std::usize::MAX;
 use rand::Rng;
 use std::cmp;
 use std::ops::{Add, Mul};
@@ -137,6 +138,10 @@ impl Tensor{
         }
         index_1d
     }
+    
+    pub fn shape(&self) -> Vec<usize>{
+        self.0.borrow().shape.clone()
+    }
 
     // inverzna operacija od index_1d (od 1d indeksa pravimo n-dimenzioni indeks)
     pub fn index_1d_to_nd(index_1d: usize, shape: &[usize]) -> Vec<usize>{
@@ -189,8 +194,10 @@ impl Tensor{
         let max_len = cmp::max(shape_a.len(), shape_b.len());
         let mut broadcast_shape = vec![0; max_len];
         for i in 0..max_len{
-            let mut curr_a = 0;
-            let mut curr_b = 0;
+            // MORA curr_a,b = 1 ne 0 jer dole imam else kad je curr_a == 1, result_dim = curr_b
+            //otkrio bug automatski AI test generation
+            let mut curr_a = 1;
+            let mut curr_b = 1;
 
             if i < shape_a.len(){
                 curr_a = shape_a[shape_a.len() - i - 1]
@@ -200,7 +207,7 @@ impl Tensor{
                 curr_b = shape_b[shape_b.len() - i - 1]
             }
 
-            let mut result_dimension = 0;
+            let mut result_dimension = 1;
 
             if curr_a == curr_b{
                 result_dimension = curr_a;
@@ -210,10 +217,11 @@ impl Tensor{
                 }else if curr_b == 1{
                     result_dimension = curr_a;
                 }else{
-                    return Err(format!("Operands could not be broadcast together: shape_a[{}] = {} != shape_b[{}] = {}", i, shape_a[i], i, shape_b[i]));
+                    return Err(format!("Operands could not be broadcast together: curr_a = {}, curr_b = {}", curr_a, curr_b));
+                    //return Err(format!("Operands could not be broadcast together: shape_a[{}] = {} != shape_b[{}] = {}", i, shape_a[i], i, shape_b[i]));
                 }
             }
-            broadcast_shape[i] = result_dimension;
+            broadcast_shape[max_len - i - 1] = result_dimension;
         }
 
         Ok(broadcast_shape)
@@ -238,12 +246,266 @@ impl Tensor{
         let flattened_idx = Self::index_1d(original_indices, original_shape);
         flattened_idx
     }
+
+
+    pub fn matmul(&self, other: &Tensor) -> Tensor{
+        let self_shape = &self.0.borrow().shape;
+        let other_shape = &other.0.borrow().shape;
+        match (self_shape.len(), other_shape.len()) {
+            (2,2) => self.matmul_2d(&other),
+            (3,3) => self.matmul_batched_3d(&other),
+            (3,2) => self.matmul_3d_and_2d(&other),
+            _ => panic!(),
+        }
+    }
+
+    fn matmul_2d(&self, other: &Tensor) -> Tensor{
+        let shape_a = &self.0.borrow().shape;
+        let shape_b = &other.0.borrow().shape;
+
+        assert_eq!(shape_a[1], shape_b[0]);
+
+        let (m, n) = (shape_a[0], shape_a[1]);
+        let (x, y)   = (shape_b[0], shape_b[1]);
+
+        let a_data = &self.0.borrow().data;
+        let b_data = &other.0.borrow().data;
+
+        let mut result_data = vec![0.0; m*y];
+
+        for i in 0..m{
+            for j in 0..y{
+                let mut element = 0.0;
+                //mogu i n i x
+                for k in 0..n{
+                    element += a_data[i * n + k] * b_data[y * k + j]
+                }
+                result_data[i * y + j] = element;
+            }
+        }
+
+        let result = Tensor::new(result_data, vec![m, y], true, vec![self.0.clone(), other.0.clone()], TensorOp::MatMul);
+
+        //backwards sad
+        // ovo mora jer ce kasnije ovaj backwards biti pozvan kada ne budu vise ove varijable postojale
+        let result_copy = result.0.clone();
+        let self_copy = self.0.clone();
+        let other_copy = other.0.clone();
+
+        // a je prvi clan b je drugi clan c = a + b; c = self + other
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let grad_result = &result_copy.borrow().grad;
+            let a_data = &self_copy.borrow().data;
+            let b_data = &other_copy.borrow().data;
+
+
+            // n == x
+            // posto je G * B^T => G je shape-a m,y (shape_a[0], shape_b[1]) a B^T je (shape_b[1],shape_b[0)) y,x - iteriramo po m i x tj. po A jer racunamo izvod za A
+            // posto mi ne transponujemo matricu direktno to znaci da pri indeksiranju moramo da je "transponujemo" pa onda mul i transpose zajedno daju efekat
+            // da mnozimo red sa redom.
+            for i in 0..m{
+                for j in 0..n{
+                    let mut element = 0.0;
+                    for k in 0..y{
+                        element += grad_result[i * y + k] * b_data[j * y + k];
+                    }
+                    self_copy.borrow_mut().grad[i * n + j] += element;
+                }
+            }
+
+            // n == x ne zaboraviti
+
+            //m n , x y
+            for i in 0..x{
+                for j in 0..y{
+                    let mut element = 0.0;
+                    for k in 0..n{
+                        element += a_data[k * n + i] * grad_result[k * y + j];
+                    }
+                    other_copy.borrow_mut().grad[i * y + j] += element;
+                }
+            }
+        }));
+
+        result
+    }
+
+    fn matmul_batched_3d(&self, other: &Tensor) -> Tensor{
+        let shape_a = &self.0.borrow().shape;
+        let shape_b = &other.0.borrow().shape;
+
+        assert_eq!(shape_a[0], shape_b[0]);
+        assert_eq!(shape_a[2], shape_b[1]);
+
+        let (batch, m, n ) = (shape_a[0], shape_a[1], shape_a[2]);
+        let (_, n, y)   = (shape_b[0], shape_b[1], shape_b[2]);
+
+        let a_data = &self.0.borrow().data;
+        let b_data = &other.0.borrow().data;
+
+        let mut result_data = vec![0.0; batch * m*y];
+
+        for b in 0..batch{
+            let a_offset = b * (m * n);
+            let b_offset = b * (n * y);
+            let c_offset = b * (m * y);
+            for i in 0..m{
+                for j in 0..y{
+                    let mut sum = 0.0;
+                    for k in 0..n{
+                        let a_idx = a_offset +  i * n + k;
+                        let b_idx = b_offset + k * y + j;
+                        sum += a_data[a_idx] * b_data[b_idx];
+                    }
+                    result_data[c_offset + i * y + j] = sum;
+                }
+            }
+        }
+
+        let result = Tensor::new(result_data, vec![batch, m, y], true, vec![self.0.clone(), other.0.clone()], TensorOp::MatMul);
+
+
+        let result_copy = result.0.clone();
+        let self_copy = self.0.clone();
+        let other_copy = other.0.clone();
+
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+
+        }));
+
+        result
+    }
+    fn matmul_3d_and_2d(&self, other: &Tensor) -> Tensor{
+
+        let shape_a = &self.0.borrow().shape;
+        let shape_b = &other.0.borrow().shape;
+
+        assert_eq!(shape_a[2], shape_b[0]);
+
+        let (batch, m, n ) = (shape_a[0], shape_a[1], shape_a[2]);
+        let (n, y)   = (shape_b[0], shape_b[1]);
+
+        let a_data = &self.0.borrow().data;
+        let b_data = &other.0.borrow().data;
+
+        let mut result_data = vec![0.0; batch * m*y];
+
+        for b in 0..batch{
+            let a_offset = b * (m * n);
+            let c_offset = b * (m * y);
+            for i in 0..m{
+                for j in 0..y{
+                    let mut sum = 0.0;
+                    for k in 0..n{
+                        let a_idx = a_offset +  i * n + k;
+                        let b_idx = k * y + j;
+                        sum += a_data[a_idx] * b_data[b_idx];
+                    }
+                    result_data[c_offset + i * y + j] = sum;
+                }
+            }
+        }
+
+        let result = Tensor::new(result_data, vec![batch, m, y], true, vec![self.0.clone(), other.0.clone()], TensorOp::MatMul);
+
+        //backwards sad
+        // ovo mora jer ce kasnije ovaj backwards biti pozvan kada ne budu vise ove varijable postojale
+        let result_copy = result.0.clone();
+        let self_copy = self.0.clone();
+        let other_copy = other.0.clone();
+
+        // a je prvi clan b je drugi clan c = a + b; c = self + other
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let grad_result = &result_copy.borrow().grad;
+            let a_data = &self_copy.borrow().data;
+            let b_data = &other_copy.borrow().data;
+
+
+            // n == x
+            // Sada radimo [batch, m, n] i [x, y], znaci kada racunamo gA = G(b,m,y) i B^T(y, n) ali trenutni je B(n, y), za svaki batch - prakticno posto je mnozenje
+            // i T onda kao da mnozim red iz prve i red iz druge matrice kad se sve to sredi
+            for b in 0..batch{
+                for i in 0..m{
+                    for j in 0..n{
+                        let mut element = 0.0;
+                        for k in 0..y{
+                            let result_idx = b * (m * y) + i * y + k;
+                            let b_idx = j * y + k;
+                            element += grad_result[result_idx] * b_data[b_idx];
+                        }
+                        self_copy.borrow_mut().grad[b * m * n + i * n + j] += element;
+                    }
+                }
+            }
+
+            // ovde moram da akumuliram preko batcheva a svaki batch je transponovan (mn - ny)
+            for i in 0..n{
+                for j in 0..y{
+                    let mut element = 0.0;
+                    for b in 0..batch{
+                        for k in 0..m{
+                            let a_idx = b * (m * n) + k * n + i;
+                            let result_idx = b * (m * y) + k * y + j;
+                            element += a_data[a_idx] * grad_result[result_idx];
+                        }
+                    }
+                    other_copy.borrow_mut().grad[i * y + j] += element;
+                }
+            }
+        }));
+
+        result
+    }
+
+    pub fn relu(&self) -> Tensor{
+        let data = &self.0.borrow().data;
+        let shape = self.0.borrow().shape.clone();
+        
+        let mut result_data = vec![0.0; data.len()];
+
+        for i in 0..data.len(){
+            result_data[i] = data[i].max(0.0);
+        }
+
+        let result = Tensor::new(result_data, shape,true,vec![self.0.clone()], TensorOp::ReLU);
+
+        let result_copy = result.0.clone();
+        let self_copy = self.0.clone();
+
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+
+            let result_grad = &result_copy.borrow().grad;
+            let input_data = &self_copy.borrow().data;
+            
+            for i in 0..result_grad.len(){
+                if input_data[i] > 0.0{
+                    self_copy.borrow_mut().grad[i] += result_grad[i];
+                }
+            }
+        }));
+        result
+    }
+
+    pub fn maxpool_2d(&self, kernel_size: usize, stride: usize) -> Tensor{
+        let data = &self.0.borrow().data;
+        let shape = &self.0.borrow().shape;
+
+        assert_eq!(shape.len(), 4, "Maxpool needs 4d input.");
+
+        let (batch, channels, height, width) = (shape[0], shape[1], shape[2], shape[3]);
+
+
+    }
 }
 
 impl Add for Tensor{
     type Output = Self;
 
 	fn add(self, other: Self) -> Self{
+        // da ne bih u foru sve vreme borrow pozivao...
+        let self_data = &self.0.borrow().data;
+        let other_data = &other.0.borrow().data;
+
         let a_shape = &self.0.borrow().shape;
         let b_shape = &other.0.borrow().shape;
 
@@ -264,15 +526,21 @@ impl Add for Tensor{
 
         // ovde zelim da dobijem indeks prvo pozicije i u result_shape-u
         // pa onda posle toga trazim
-        for i in 0..result_len{
-            let result_idx = Self::index_1d_to_nd(i, &result_shape);
+        if a_shape == b_shape{
+            for i in 0..result_len{
+                result_data[i] = self_data[i] + other_data[i];
+            }
+        }else{
+            for i in 0..result_len{
+                let result_idx = Self::index_1d_to_nd(i, &result_shape);
 
-            let a_idx = Self::util_get_broadcast_idx_value(a_shape, &result_shape, &result_idx);
-            let b_idx = Self::util_get_broadcast_idx_value(b_shape, &result_shape, &result_idx);
+                let a_idx = Self::util_get_broadcast_idx_value(a_shape, &result_shape, &result_idx);
+                let b_idx = Self::util_get_broadcast_idx_value(b_shape, &result_shape, &result_idx);
 
-            result_data[i] = self.0.borrow().data[a_idx] + other.0.borrow().data[b_idx];
+                result_data[i] = self_data[a_idx] + other_data[b_idx];
 
-            //result_data[i] = self.0.borrow().data[i] + other.0.borrow().data[i];
+                //result_data[i] = self.0.borrow().data[i] + other.0.borrow().data[i];
+            }
         }
 
         let result = Tensor::new(result_data, result_shape.clone(), true, vec![self.0.clone(), other.0.clone()], TensorOp::Add);
@@ -313,6 +581,10 @@ impl Mul for Tensor{
     type Output = Self;
 
     fn mul(self, other: Self) -> Self{
+        //isto kao u Add-u
+        let self_data = &self.0.borrow().data;
+        let other_data = &other.0.borrow().data;
+
         let a_shape = &self.0.borrow().shape;
         let b_shape = &other.0.borrow().shape;
 
@@ -330,14 +602,21 @@ impl Mul for Tensor{
 
         let mut result_data = vec![0.0; result_len];
 
-        for i in 0..result_len{
-            let result_idx = Self::index_1d_to_nd(i, &result_shape);
+        if a_shape == b_shape{
+            for i in 0..result_len{
+                result_data[i] = self_data[i] * other_data[i];
+            }
+        }else{
+            for i in 0..result_len{
+                let result_idx = Self::index_1d_to_nd(i, &result_shape);
 
-            let a_idx = Self::util_get_broadcast_idx_value(&a_shape, &result_shape, &result_idx);
-            let b_idx = Self::util_get_broadcast_idx_value(&b_shape, &result_shape, &result_idx);
+                let a_idx = Self::util_get_broadcast_idx_value(&a_shape, &result_shape, &result_idx);
+                let b_idx = Self::util_get_broadcast_idx_value(&b_shape, &result_shape, &result_idx);
 
-            result_data[i] = self.0.borrow().data[a_idx] * other.0.borrow().data[b_idx];
+                result_data[i] = self_data[a_idx] * other_data[b_idx];
+            }
         }
+
         let result = Tensor::new(result_data, result_shape.clone(), true, vec![self.0.clone(), other.0.clone()], TensorOp::Mul);
 
 
