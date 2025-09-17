@@ -12,7 +12,7 @@ fn main() {
     let ones_tensor = Tensor::ones(vec![3, 2]);
     println!("✅ Created ones tensor with shape {:?}", ones_tensor.shape());
     
-    let random_tensor = Tensor::randn(vec![2, 2]);
+    let random_tensor = Tensor::randn_uniform(vec![2, 2]);
     println!("✅ Created random tensor with shape {:?}", random_tensor.shape());
     
     // ===== INDEX CONVERSION TESTING =====
