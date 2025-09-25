@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn test_tensor_creation_randn() {
         let shape = vec![3, 4];
-        let _t = Tensor::randn_uniform(shape.clone());
+        let _t = Tensor::randn_uniform_init(shape.clone());
         let total = shape.iter().product::<usize>();
 
         // we can't see the raw data here, but at least the shape

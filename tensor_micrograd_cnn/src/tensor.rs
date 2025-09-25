@@ -1,3 +1,4 @@
+use core::num;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
@@ -6,6 +7,7 @@ use std::usize::MAX;
 use rand::Rng;
 use std::cmp;
 use std::ops::{Add, Mul};
+use rand_distr::{Normal, Distribution};
 
 #[derive(Debug, Clone)]
 enum TensorOp{
@@ -14,6 +16,7 @@ enum TensorOp{
     Mul,
     MatMul,
     ReLU,
+    Im2Col,
     Conv2d,
     MaxPool2d,
     //Sum,
@@ -120,7 +123,7 @@ impl Tensor{
         Tensor::new(data, shape, requires_grad, children, op)
     }
 
-    pub fn randn_uniform(shape: Vec<usize>) -> Tensor{
+    pub fn randn_uniform_init(shape: Vec<usize>) -> Tensor{
         let mut flattened_size = 1;
         for dimension in &shape{
             flattened_size *= dimension;
@@ -130,7 +133,40 @@ impl Tensor{
         for i in 0..flattened_size{
             data.push(rng.gen_range(-1.0 as Precision..1.0 as Precision));
         }
-        let requires_grad = false;
+        let requires_grad = true;
+        let children = vec![];
+        let op = TensorOp::None;
+
+        Tensor::new(data, shape, requires_grad, children, op)
+    }
+
+    pub fn kaiming_he_init(shape: Vec<usize>) -> Tensor{
+        let mut inputs_to_each_neuron = 1;
+        // za conv uzimam ceo filter a za linear samo in_features/ in_channels
+        // 2 opcije
+        // za linear shape len je 2
+        // za 
+        if shape.len() == 2{
+            inputs_to_each_neuron *= shape[0];
+        }else if shape.len() == 4{
+            inputs_to_each_neuron *= shape[1] * shape[2] * shape[3];
+        }
+
+        let mut flattened_size = 1;
+        for dimension in &shape{
+            flattened_size *= dimension;
+        }
+
+        let bound = (2.0 / inputs_to_each_neuron as f64).sqrt();
+        let normal = Normal::new(0.0, bound).unwrap(); // `unwrap` is okay here, as std_dev > 0
+        
+        let mut rng = rand::thread_rng();
+        let mut data = Vec::with_capacity(flattened_size);
+        for i in 0..flattened_size{
+            let value = normal.sample(&mut rng) as Precision;
+            data.push(value);
+        }
+        let requires_grad = true;
         let children = vec![];
         let op = TensorOp::None;
 
@@ -141,6 +177,10 @@ impl Tensor{
         self.0.borrow_mut().grad.fill(0.0 as Precision);
     }
 
+    pub fn set_requires_grad(&self, requires_grad: bool){
+        self.0.borrow_mut().requires_grad = requires_grad;
+    }
+
     pub fn reshape(&self, new_shape: Vec<usize>) -> Tensor{
         let data = self.0.borrow().data.clone();
 
@@ -148,7 +188,7 @@ impl Tensor{
         let mut old_size: usize = 1;
 
         let old_shape = &self.0.borrow().shape;
-        
+
         for i in 0..old_shape.len(){
             old_size *=  old_shape[i];
         }
@@ -765,6 +805,153 @@ impl Tensor{
         }));
         result
     }
+
+    pub fn im2col(&self, kernel_h: usize, kernel_w: usize, stride: usize, padding: usize) -> Tensor{
+
+        let data_borrow = self.0.borrow();
+        let data = &data_borrow.data;
+        let shape = data_borrow.shape.clone();
+
+        let (batches, channels, height, width) = (shape[0], shape[1], shape[2], shape[3]);
+        let receptive_field = kernel_h * kernel_w * channels;
+
+        let out_height = (height + 2 * padding - kernel_h)/stride + 1;
+        let out_width = (width + 2 * padding - kernel_w)/stride +1;
+        let number_of_receptive_fields = out_height * out_width;
+        let mut col_data = vec![0.0 as Precision; batches * number_of_receptive_fields * receptive_field];
+
+        for b in 0..batches{
+            let base_data_idx = b * channels * height * width;
+            for o_h in 0..out_height{
+                for o_w in 0..out_width{
+
+                    for c in 0..channels{
+
+                        let current_channel_idx = c * height * width;
+
+                        let col_matrix_col_idx = b * number_of_receptive_fields + o_h * out_width + o_w;
+                    
+                        for kh in 0..kernel_h{
+                            for kw in 0..kernel_w{
+                                let input_idx_x = o_w * stride + kw;
+                                let input_idx_y = o_h * stride + kh;
+
+                                let value;
+
+                                // ovde mi je dosta pomogao onaj stanford cs231n vizuelizacija konvolucije
+                                if input_idx_x >= padding && input_idx_x - padding < width && input_idx_y >= padding  && input_idx_y - padding < height{
+                                    let real_idx_x = input_idx_x - padding;
+                                    let real_idx_y = input_idx_y - padding;
+                                    value = data[base_data_idx + current_channel_idx + real_idx_y * width + real_idx_x];
+                                }else{
+                                    value = 0.0 as Precision;
+                                }
+
+                                let number_of_rows_to_skip = (kh * kernel_w + kw) + (c * kernel_w * kernel_h);
+                            
+                                // prakticno [363 x 3025] number_of_receptive_fields je 3025 a 363 mi je filter_x * filter_y * channels, batchevi se stackuju takodje po koloni
+                                //znaci prvo odradim prvi batch pa drugi itd...
+                                let col_matrix_row_idx = number_of_rows_to_skip * batches * number_of_receptive_fields;
+
+                                let col_idx = col_matrix_row_idx + col_matrix_col_idx;
+                                col_data[col_idx] = value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let result = Tensor::new(col_data, vec![receptive_field, batches * number_of_receptive_fields], true,vec![self.0.clone()], TensorOp::Im2Col);
+        
+        let result_copy = result.0.clone();
+        let self_copy = self.0.clone();
+
+        let (kernel_h_backwards, kernel_w_backwards, stride_backwards, padding_backwards) = (kernel_h, kernel_w, stride, padding);
+        let (batches_backwards, channels_backwards, height_backwards, width_backwards) = (batches, channels, height, width);
+        let (out_h_backwards, out_w_backwards) = (out_height, out_width);
+
+        let (number_of_receptive_fields_backwards) = (number_of_receptive_fields);
+
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let result_grad = result_copy.borrow();
+            let mut self_borrow = self_copy.borrow_mut();
+
+            for b in 0..batches_backwards{
+            let base_data_idx = b * channels_backwards * height_backwards * width_backwards;
+                for o_h in 0..out_h_backwards{
+                    for o_w in 0..out_w_backwards{
+
+                        for c in 0..channels_backwards{
+
+                            let current_channel_idx = c * height_backwards * width_backwards;
+
+                            let col_matrix_col_idx = b * number_of_receptive_fields_backwards + o_h * out_w_backwards + o_w;
+                        
+                            for kh in 0..kernel_h_backwards{
+                                for kw in 0..kernel_w_backwards{
+                                    let input_idx_x = o_w * stride_backwards + kw;
+                                    let input_idx_y = o_h * stride_backwards + kh;
+
+                                    //let value;
+
+                                    let number_of_rows_to_skip = (kh * kernel_w_backwards + kw) + (c * kernel_w_backwards * kernel_h_backwards);
+                                
+                                    // prakticno [363 x 3025] number_of_receptive_fields je 3025 a 363 mi je filter_x * filter_y * channels, batchevi se stackuju takodje po koloni
+                                    //znaci prvo odradim prvi batch pa drugi itd...
+                                    let col_matrix_row_idx = number_of_rows_to_skip * batches_backwards * number_of_receptive_fields_backwards;
+
+                                    let col_idx = col_matrix_row_idx + col_matrix_col_idx;
+
+                                    // ovde mi je dosta pomogao onaj stanford cs231n vizuelizacija konvolucije
+                                    if input_idx_x >= padding_backwards && input_idx_x - padding_backwards < width_backwards && input_idx_y >= padding_backwards  && input_idx_y - padding_backwards < height_backwards{
+                                        let real_idx_x = input_idx_x - padding_backwards;
+                                        let real_idx_y = input_idx_y - padding_backwards;
+                                        //value = self_borrow.data[base_data_idx + current_channel_idx + real_idx_y * width + real_idx_x];
+                                        let in_idx = base_data_idx + current_channel_idx + real_idx_y * width_backwards + real_idx_x;
+
+                                        self_borrow.grad[in_idx] += result_grad.grad[col_idx];
+
+                                    }
+                                    //col_data[col_idx] = value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        
+        result
+    }
+
+    pub fn conv2d(&self, kernel: &Tensor, stride: usize, padding: usize, bias: Option<&Tensor>) -> Tensor{
+
+        let shape = self.shape();
+
+        let (batches, channels, height, width) = (shape[0], shape[1], shape[2], shape[3]);
+
+        let kernel_shape = kernel.shape();
+
+        let (number_of_filters, channels, kernel_height, kernel_width) = (kernel_shape[0], kernel_shape[1], kernel_shape[2], kernel_shape[3]);
+        
+        let out_height = (height + 2 * padding - kernel_height)/stride + 1;
+        let out_width = (width + 2 * padding - kernel_width)/stride +1;
+        
+        let X_col = self.im2col(kernel_height, kernel_width, stride, padding);
+
+        let W_row = kernel.reshape(vec![number_of_filters, channels * kernel_height * kernel_width]);
+
+        let conv2d_result = W_row.matmul(&X_col);
+
+        let mut reshaped_conv2d_result = conv2d_result.reshape(vec![batches, number_of_filters, out_height, out_width]);
+
+        //clone u bias tensoru klonira RC, tako da clone pointuje na isti TensorCore sto znaci da ce bias biti dobar
+        if let Some(bias_tensor) = bias{
+            reshaped_conv2d_result = reshaped_conv2d_result + bias_tensor.reshape(vec![1, number_of_filters, 1, 1]);
+        } 
+        
+        reshaped_conv2d_result
+    }
 }
 
 impl Add for Tensor{
@@ -887,7 +1074,7 @@ impl Mul for Tensor{
             Ok(result) => {
                 result_shape = result;
                 for shape in &result_shape{
-                    result_len *= shape;
+            result_len *= shape; 
                 }
             },
             Err(err) => panic!("{:?}", err)
