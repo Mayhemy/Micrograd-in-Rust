@@ -21,7 +21,7 @@ impl Linear{
         Linear { weights: weight_tensor, biases: bias_tensor}
     }
 
-    pub fn foward(&self, input : &Tensor) -> Tensor{
+    pub fn forward(&self, input : &Tensor) -> Tensor{
         let mut output = input.matmul(&self.weights);
         if let Some(ref bias)= self.biases{
             // zato sto je bias shape samo vec![out_features] onda mogu da uzmem 0
@@ -62,7 +62,7 @@ impl Conv2d{
         Conv2d{weights: weight_tensor, biases: bias_tensor, stride: stride, padding: padding}
     }
 
-    pub fn foward(&self, input: &Tensor) -> Tensor{
+    pub fn forward(&self, input: &Tensor) -> Tensor{
         let output = input.conv2d(&self.weights, self.stride, self.padding, self.biases.as_ref());
         output
     }

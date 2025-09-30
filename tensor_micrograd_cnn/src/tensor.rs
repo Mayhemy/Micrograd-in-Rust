@@ -262,6 +262,102 @@ impl Tensor{
         }
     }
 
+    pub fn cross_entropy_loss(prediction: &Tensor, target: &Tensor) -> Tensor{
+        let prediction_borrow = prediction.0.borrow();
+        let target_borrow = target.0.borrow();
+
+        let (batches, num_classes) = (prediction.shape()[0], prediction.shape()[1]);
+
+        //let mut max_prediction: Vec<f32> = vec![Precision::MIN; batches];
+        //let mut log_sum_exp: Vec<f32> = vec![0.0 as Precision; batches];
+        //let mut negative_log_likelihood: Vec<f32> = vec![0.0 as Precision; batches];
+
+
+        let mut batch_loss = 0.0 as Precision;
+
+        for i in 0..batches{
+            let mut row_max = Precision::MIN;
+            for j in 0..num_classes{
+                let curr_val = prediction_borrow.data[i * num_classes + j ];
+                if curr_val > row_max{
+                    row_max = curr_val;
+                }
+            }
+
+            let mut sum_exp = 0.0 as Precision;;
+            for j in 0..num_classes{
+                sum_exp += (prediction_borrow.data[i * num_classes + j] - row_max).exp()
+            }
+
+            let lse = sum_exp.ln() + row_max;
+
+            let true_class = prediction_borrow.data[i * num_classes + target_borrow.data[i] as usize];
+
+            batch_loss += lse - true_class;
+
+        }
+
+        batch_loss = batch_loss / batches as Precision;
+
+        let result = Tensor::new(vec![batch_loss], vec![1], true, vec![prediction.0.clone()], TensorOp::None);
+
+
+        let prediction_copy = prediction.clone();
+        let target_copy = target.clone();
+
+        result.0.borrow_mut().backward = Some(Box::new(move || {
+            let (max_per_batch, denominator_per_batch) = {
+                let logits = prediction_copy.0.borrow();
+                let targets = target_copy.0.borrow();
+                //let mut logits_mutable = prediction_copy.0.borrow_mut();
+
+                let mut max_per_batch = vec![0.0 as Precision; batches];
+                let mut denominator_per_batch = vec![0.0 as Precision; batches];
+
+                for i in 0..batches {
+                    let mut batch_max = Precision::MIN;
+                    for j in 0..num_classes{
+                        if logits.data[i * num_classes + j] > batch_max{
+                            batch_max = logits.data[i * num_classes + j];
+                        }
+                    }
+                    max_per_batch[i] = batch_max;
+                    let mut denominator_sum = 0.0 as Precision;
+                    for j in 0..num_classes {
+                        denominator_sum += (logits.data[i * num_classes + j] - batch_max).exp();
+                    }
+                    denominator_per_batch[i] = denominator_sum;
+                }
+                (max_per_batch, denominator_per_batch)
+            };
+                    let targets = target_copy.0.borrow();
+                    let mut logits_mutable = prediction_copy.0.borrow_mut();
+                    for i in 0..batches{
+                        for j in 0..num_classes {
+                            let numerator = (logits_mutable.data[i * num_classes + j] - max_per_batch[i]).exp();
+                            let softmax = numerator / denominator_per_batch[i];
+                            // ovde je ovo de facto one-hot, cak i ako ne konstruktujemo one-hot array
+                            let mut one_hot = Precision::MIN;
+                            if j == targets.data[i] as usize {
+                                one_hot = 1.0;
+                            }
+                            logits_mutable.grad[i * num_classes + j] += (softmax - one_hot) / (batches as Precision);
+                        }
+                    }
+        }));
+        
+
+        result
+
+    }
+
+    pub fn s_gradient_descent_update_params(&self, learning_rate : Precision){
+        let mut params = self.0.borrow_mut();
+        for i in 0..params.data.len(){
+            params.data[i] -= learning_rate * params.grad[i];
+        }
+    }
+
     pub fn build_topological_graph(&self) -> Vec<Tensor>{
         let mut topologically_sorted: Vec<Tensor> = Vec::new();
 		let mut visited: HashSet<Tensor> = HashSet::new();
