@@ -31,26 +31,48 @@ impl AlexNet{
     }
 
     pub fn forward(&self, input: &Tensor) -> Tensor{
+        //println!("FORWARD0");
 
         let mut x = self.c2d_layer1.forward(input).relu();
+        //println!("FORWARD1");
+
         x = x.maxpool_2d(3, 2);
+        //println!("FORWARD2");
+
 
         x = self.c2d_layer2.forward(&x).relu();
+        //println!("FORWARD3");
+
         x = x.maxpool_2d(3, 2);
+        //println!("FORWARD4");
+
 
         x = self.c2d_layer3.forward(&x).relu();
+        //println!("FORWARD5");
+
         x = self.c2d_layer4.forward(&x).relu();
+        //println!("FORWARD6");
+
 
         x = self.c2d_layer5.forward(&x).relu();
+        //println!("FORWARD7");
+
         x = x.maxpool_2d(3, 2);
+        //println!("FORWARD8");
+
 
         let batch = x.shape()[0];
         x = x.reshape(vec![batch, 6 * 6 * 256]);
 
         //FC ovde sadrzi i batcheve
         x = self.fc_layer6.forward(&x).relu();
+        //println!("FORWARD9");
+
         x = self.fc_layer7.forward(&x).relu();
+        //println!("FORWARD10");
+
         x = self.fc_layer8.forward(&x);
+        //println!("FORWARD11");
 
         x
     }

@@ -11,7 +11,7 @@ pub use alexnet::{AlexNet};
 pub mod train;
 pub use train::{S_Gradient_Descent};
 
-pub mod data;
+pub mod data_loader;
 
 #[cfg(test)]
 mod tensor_tests;

@@ -8,9 +8,10 @@ use rand::Rng;
 use std::cmp;
 use std::ops::{Add, Mul};
 use rand_distr::{Normal, Distribution};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
-enum TensorOp{
+pub enum TensorOp{
 	Reshape,
     Add,
     Mul,
@@ -98,6 +99,10 @@ impl Tensor{
         };
         Tensor(Rc::new(RefCell::new(tensor)))
     }
+
+    pub fn new_data(data :Vec<Precision>, shape: Vec<usize>) -> Self{
+        Tensor::new(data, shape, false, vec![], TensorOp::None)
+    }
     
     pub fn zeros(shape: Vec<usize>) -> Tensor{
         let mut flattened_size = 1;
@@ -179,6 +184,10 @@ impl Tensor{
 
     pub fn set_requires_grad(&self, requires_grad: bool){
         self.0.borrow_mut().requires_grad = requires_grad;
+    }
+
+    pub fn get_loss(&self) -> f32{
+        self.0.borrow().data[0].clone()
     }
 
     pub fn reshape(&self, new_shape: Vec<usize>) -> Tensor{
@@ -337,7 +346,7 @@ impl Tensor{
                             let numerator = (logits_mutable.data[i * num_classes + j] - max_per_batch[i]).exp();
                             let softmax = numerator / denominator_per_batch[i];
                             // ovde je ovo de facto one-hot, cak i ako ne konstruktujemo one-hot array
-                            let mut one_hot = Precision::MIN;
+                            let mut one_hot = 0.0;
                             if j == targets.data[i] as usize {
                                 one_hot = 1.0;
                             }
@@ -459,6 +468,7 @@ impl Tensor{
     }
 
     fn matmul_2d(&self, other: &Tensor) -> Tensor{
+        let min_parallel_len = 8;
         let shape_a = &self.0.borrow().shape;
         let shape_b = &other.0.borrow().shape;
 
@@ -475,18 +485,30 @@ impl Tensor{
 
         let mut result_data = vec![0.0; m*y];
 
-        for i in 0..m{
+
+        result_data.par_chunks_mut(y).with_min_len(min_parallel_len).enumerate().for_each(|(i, result_row)|{
             let a_row = i * n;
-            let result_row = i * y;
             for j in 0..y{
-                let mut element = 0.0;
-                //mogu i n i x
+                let mut element = 0.0 as Precision;
                 for k in 0..n{
-                    element += a_data[a_row + k] * b_data[y * k + j]
+                    element = a_data[a_row] * b_data[y * k + j];
                 }
-                result_data[result_row + j] = element;
+                result_row[j] = element;
             }
-        }
+        });
+
+        // for i in 0..m{
+        //     let a_row = i * n;
+        //     let result_row = i * y;
+        //     for j in 0..y{
+        //         let mut element = 0.0;
+        //         //mogu i n i x
+        //         for k in 0..n{
+        //             element += a_data[a_row + k] * b_data[y * k + j]
+        //         }
+        //         result_data[result_row + j] = element;
+        //     }
+        // }
 
         let result = Tensor::new(result_data, vec![m, y], true, vec![self.0.clone(), other.0.clone()], TensorOp::MatMul);
 
@@ -495,101 +517,138 @@ impl Tensor{
         let result_copy = result.0.clone();
         let self_copy = self.0.clone();
         let other_copy = other.0.clone();
-
-
-        let is_same_operand = Rc::ptr_eq(&self_copy, &other_copy);
+        let min_parallel_len_heap = min_parallel_len.clone();
 
         // a je prvi clan b je drugi clan c = a + b; c = self + other
         result.0.borrow_mut().backward = Some(Box::new(move || {
+
         {
-            if is_same_operand{
-                let grad_result = result_copy.borrow();
-                //let a_data = &self_copy.borrow().data;
-                let b_data_vec = other_copy.borrow().data.clone();
-                let mut self_grad = self_copy.borrow_mut();
-                //let mut other_grad = other_copy.borrow_mut();
-    
-    
-                // n == x
-                // posto je G * B^T => G je shape-a m,y (shape_a[0], shape_b[1]) a B^T je (shape_b[1],shape_b[0)) y,x - iteriramo po m i x tj. po A jer racunamo izvod za A
-                // posto mi ne transponujemo matricu direktno to znaci da pri indeksiranju moramo da je "transponujemo" pa onda mul i transpose zajedno daju efekat
-                // da mnozimo red sa redom.
-                for i in 0..m{
-                    let result_row = i * y;
-                    let a_row =  i * n;
-                    for j in 0..n{
-                        let b_col = j * y;
-                        let mut element = 0.0;
-                        for k in 0..y{
-                            element += grad_result.grad[result_row + k] * b_data_vec[b_col + k];
-                        }
-                        self_grad.grad[a_row + j] += element;
-                    }
-                }
-            }else{
-                let grad_result = result_copy.borrow();
-                //let a_data = &self_copy.borrow().data;
-                let b_data = other_copy.borrow();
-                let mut self_grad = self_copy.borrow_mut();
-                //let mut other_grad = other_copy.borrow_mut();
+            let result_grad = result_copy.borrow().grad.clone();
+            let right_operand_data = other_copy.borrow().data.clone();
+            let mut left_operand = self_copy.borrow_mut();
 
-
-                // n == x
-                // posto je G * B^T => G je shape-a m,y (shape_a[0], shape_b[1]) a B^T je (shape_b[1],shape_b[0)) y,x - iteriramo po m i x tj. po A jer racunamo izvod za A
-                // posto mi ne transponujemo matricu direktno to znaci da pri indeksiranju moramo da je "transponujemo" pa onda mul i transpose zajedno daju efekat
-                // da mnozimo red sa redom.
-                for i in 0..m{
-                    let result_row = i * y;
-                    let a_row =  i * n;
-                    for j in 0..n{
-                        let b_col = j * y;
-                        let mut element = 0.0;
-                        for k in 0..y{
-                            element += grad_result.grad[result_row + k] * b_data.data[b_col + k];
-                        }
-                        self_grad.grad[a_row + j] += element;
+             // n == x
+            // posto je G * B^T => G je shape-a m,y (shape_a[0], shape_b[1]) a B^T je (shape_b[1],shape_b[0)) y,x - iteriramo po m i x tj. po A jer racunamo izvod za A
+            // posto mi ne transponujemo matricu direktno to znaci da pri indeksiranju moramo da je "transponujemo" pa onda mul i transpose zajedno daju efekat
+            // da mnozimo red sa redom.
+            left_operand.grad.par_chunks_mut(n).with_min_len(min_parallel_len_heap).enumerate().for_each(|(i, left_operand_row)|{
+                let result_row = i * y;
+                for j in 0..n{
+                    let b_col = j * y;
+                    let mut element = 0.0;
+                    for k in 0..y{
+                        element += result_grad[result_row + k] * right_operand_data[b_col + k];
                     }
+                    left_operand_row[j] += element;
                 }
-            }
+            });
         };
         {
-            if is_same_operand{
-                let grad_result = result_copy.borrow();
-                let a_data_vec = self_copy.borrow().data.clone();
-                let mut other_grad = other_copy.borrow_mut();
-                // n == x ne zaboraviti
-    
-                //m n , x y
-                for i in 0..x{
-                    let b_row = i * y;
-                    for j in 0..y{
-                        let mut element = 0.0;
-                        for k in 0..m{
-                            element += a_data_vec[k * n + i] * grad_result.grad[k * y + j];
-                        }
-                        other_grad.grad[b_row + j] += element;
+            let result_grad = result_copy.borrow().grad.clone();
+            let left_operand_data = self_copy.borrow().data.clone();
+            let mut right_operand = other_copy.borrow_mut();
+            // n == x ne zaboraviti
+
+            //m n , x y
+            right_operand.grad.par_chunks_mut(y).with_min_len(min_parallel_len_heap).enumerate().for_each(|(i, right_operand_row)|{
+                for j in 0..y{
+                    let mut element = 0.0;
+                    for k in 0..m{
+                        element += left_operand_data[k * n + i] * result_grad[k * y + j];
                     }
+                    right_operand_row[j] += element;
                 }
-            }else{
-                let grad_result = result_copy.borrow();
-                let a_data = self_copy.borrow();
-                let mut other_grad = other_copy.borrow_mut();
-                // n == x ne zaboraviti
+            })
+        }}));
+        // {
+        //     if is_same_operand{
+        //         let grad_result = result_copy.borrow();
+        //         //let a_data = &self_copy.borrow().data;
+        //         let b_data_vec = other_copy.borrow().data.clone();
+        //         let mut self_grad = self_copy.borrow_mut();
+        //         //let mut other_grad = other_copy.borrow_mut();
     
-                //m n , x y
-                for i in 0..x{
-                    let b_row = i * y;
-                    for j in 0..y{
-                        let mut element = 0.0;
-                        for k in 0..m{
-                            element += a_data.data[k * n + i] * grad_result.grad[k * y + j];
-                        }
-                        other_grad.grad[b_row + j] += element;
-                    }
-                }
-            }
-        }
-        }));
+    
+        //         // n == x
+        //         // posto je G * B^T => G je shape-a m,y (shape_a[0], shape_b[1]) a B^T je (shape_b[1],shape_b[0)) y,x - iteriramo po m i x tj. po A jer racunamo izvod za A
+        //         // posto mi ne transponujemo matricu direktno to znaci da pri indeksiranju moramo da je "transponujemo" pa onda mul i transpose zajedno daju efekat
+        //         // da mnozimo red sa redom.
+        //         for i in 0..m{
+        //             let result_row = i * y;
+        //             let a_row =  i * n;
+        //             for j in 0..n{
+        //                 let b_col = j * y;
+        //                 let mut element = 0.0;
+        //                 for k in 0..y{
+        //                     element += grad_result.grad[result_row + k] * b_data_vec[b_col + k];
+        //                 }
+        //                 self_grad.grad[a_row + j] += element;
+        //             }
+        //         }
+        //     }else{
+        //         let grad_result = result_copy.borrow();
+        //         //let a_data = &self_copy.borrow().data;
+        //         let b_data = other_copy.borrow();
+        //         let mut self_grad = self_copy.borrow_mut();
+        //         //let mut other_grad = other_copy.borrow_mut();
+
+
+        //         // n == x
+        //         // posto je G * B^T => G je shape-a m,y (shape_a[0], shape_b[1]) a B^T je (shape_b[1],shape_b[0)) y,x - iteriramo po m i x tj. po A jer racunamo izvod za A
+        //         // posto mi ne transponujemo matricu direktno to znaci da pri indeksiranju moramo da je "transponujemo" pa onda mul i transpose zajedno daju efekat
+        //         // da mnozimo red sa redom.
+        //         for i in 0..m{
+        //             let result_row = i * y;
+        //             let a_row =  i * n;
+        //             for j in 0..n{
+        //                 let b_col = j * y;
+        //                 let mut element = 0.0;
+        //                 for k in 0..y{
+        //                     element += grad_result.grad[result_row + k] * b_data.data[b_col + k];
+        //                 }
+        //                 self_grad.grad[a_row + j] += element;
+        //             }
+        //         }
+        //     }
+        // };
+        // {
+        //     if is_same_operand{
+        //         let grad_result = result_copy.borrow();
+        //         let a_data_vec = self_copy.borrow().data.clone();
+        //         let mut other_grad = other_copy.borrow_mut();
+        //         // n == x ne zaboraviti
+    
+        //         //m n , x y
+        //         for i in 0..x{
+        //             let b_row = i * y;
+        //             for j in 0..y{
+        //                 let mut element = 0.0;
+        //                 for k in 0..m{
+        //                     element += a_data_vec[k * n + i] * grad_result.grad[k * y + j];
+        //                 }
+        //                 other_grad.grad[b_row + j] += element;
+        //             }
+        //         }
+        //     }else{
+        //         let grad_result = result_copy.borrow();
+        //         let a_data = self_copy.borrow();
+        //         let mut other_grad = other_copy.borrow_mut();
+        //         // n == x ne zaboraviti
+    
+        //         //m n , x y
+        //         for i in 0..x{
+        //             let b_row = i * y;
+        //             for j in 0..y{
+        //                 let mut element = 0.0;
+        //                 for k in 0..m{
+        //                     element += a_data.data[k * n + i] * grad_result.grad[k * y + j];
+        //                 }
+        //                 other_grad.grad[b_row + j] += element;
+        //             }
+        //         }
+        //     }
+        // }
+        // }));
 
         result
     }

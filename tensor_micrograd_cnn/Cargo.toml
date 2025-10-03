@@ -7,8 +7,18 @@ edition = "2024"
 rand = "0.8"
 rand_distr = "0.4"
 image = "0.24"
+rayon = "1.10.0"
 
 [features]
 default = ["dtype-f32"]
 dtype-f32 = []
 dtype-f64 = []
+
+# ovo su chatgpt preporuke ispod za brzi execution?
+[profile.release] 
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[build]
+rustflags = ["-C", "target-cpu=native"]

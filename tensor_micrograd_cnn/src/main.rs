@@ -1,6 +1,9 @@
 use tensor_micrograd_cnn::Tensor;
+use tensor_micrograd_cnn::train::train;
+
 
 fn main() {
+    train();
     println!("🦀 Tensor Micrograd CNN - Demonstration 🦀\n");
 
     // ===== BASIC TENSOR CREATION =====
