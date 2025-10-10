@@ -17,8 +17,10 @@ dtype-f64 = []
 # ovo su chatgpt preporuke ispod za brzi execution?
 [profile.release] 
 opt-level = 3
-lto = "fat"
+#lto = "fat"
+lto = false
 codegen-units = 1
+debug = 2
 
 [build]
 rustflags = ["-C", "target-cpu=native"]
