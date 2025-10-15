@@ -1,6 +1,6 @@
 use std::time::Instant;
 use tensor_micrograd_cnn::Tensor;
-use tensor_micrograd_cnn::train::train;
+use tensor_micrograd_cnn::dataset::train;
 
 fn header(t: &str) {
     println!("\n=== {t} ===");

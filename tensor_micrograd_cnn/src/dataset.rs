@@ -1,7 +1,7 @@
 use core::num;
 use std::collections::HashMap;
 use crate::alexnet::{AlexNet};
-use crate::Tensor;
+use crate::{Model, Tensor};
 use crate::data_loader::{Loader};
 use crate::tensor::Precision;
 
@@ -50,9 +50,9 @@ pub fn train(){
     let mut loader;
 
     match os_name {
-        "windows" => loader = Loader::new("D:\\diplomski\\Micrograd-in-Rust\\tensor_micrograd_cnn\\src\\train", batch_size, image_height, image_width),
-        "linux" => loader = Loader::new("/mnt/d/diplomski/Micrograd-in-Rust/tensor_micrograd_cnn/src/train", batch_size, image_height, image_width),
-        _ => loader = Loader::new("D:\\diplomski\\Micrograd-in-Rust\\tensor_micrograd_cnn\\src\\train", batch_size, image_height, image_width),
+        "windows" => loader = Loader::new("D:\\diplomski\\Micrograd-in-Rust\\tensor_micrograd_cnn\\src\\dataset", batch_size, image_height, image_width),
+        "linux" => loader = Loader::new("/mnt/d/diplomski/Micrograd-in-Rust/tensor_micrograd_cnn/src/dataset", batch_size, image_height, image_width),
+        _ => loader = Loader::new("D:\\diplomski\\Micrograd-in-Rust\\tensor_micrograd_cnn\\src\\dataset", batch_size, image_height, image_width),
     }
 
     for i in 0..number_of_epochs{
